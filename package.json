@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "scrape:amantino": "tsx ./scripts/scrape-amantino.ts",
+    "scrape:escola": "tsx ./scripts/scrape-escola.ts",
     "scrape:flyers": "tsx ./scripts/scrape-flyers.ts"
   },
   "dependencies": {

@@ -2,6 +2,7 @@ import { Product } from "@/providers/types";
 import {
   classifyProduct,
   extractPackaging,
+  getNormalizedProductName,
   inferBrand,
   normalizeProductName,
   normalizeProductNameForMatching,
@@ -112,11 +113,11 @@ export function findClosestCanonicalProductId(
 ) {
   const ranked = canonicalProducts
     .map((product) => {
-      const canonicalName = product.normalizedName || product.name;
+      const canonicalName = getNormalizedProductName(product);
 
       return {
         id: product.id,
-        score: calculateTokenFuzzySimilarity(scrapedProductName, canonicalName),
+        score: calculateTokenFuzzySimilarity(getNormalizedProductName(scrapedProductName), canonicalName),
       };
     })
     .sort((left, right) => right.score - left.score);
@@ -131,8 +132,8 @@ export function findClosestCanonicalProductId(
 }
 
 export function calculateProductSimilarity(query: string, product: Product) {
-  const normalizedQuery = normalizeProductName(query);
-  const productName = product.normalizedName || normalizeProductName(product.name);
+  const normalizedQuery = getNormalizedProductName(query);
+  const productName = getNormalizedProductName(product);
 
   const queryTokens = new Set(tokenizeProductName(query));
   const productTokens = new Set(tokenizeProductName(productName));

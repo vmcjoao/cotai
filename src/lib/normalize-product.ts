@@ -29,6 +29,12 @@ export type ParsedPackaging = {
   packageText?: string;
 };
 
+export type NormalizedProductIdentityInput = {
+  name: string;
+  normalizedName?: string | null;
+  packageText?: string | null;
+};
+
 export type ExtractedProductMeasure = {
   quantity: number;
   unit: "g" | "kg" | "ml" | "l";
@@ -91,6 +97,22 @@ export function normalizeProductName(value: string) {
     .map((token) => unitMap[token] ?? token)
     .join(" ")
     .trim();
+}
+
+export function getNormalizedProductName(input: NormalizedProductIdentityInput | string) {
+  if (typeof input === "string") {
+    return normalizeProductName(input);
+  }
+
+  return normalizeProductName(input.normalizedName || input.name);
+}
+
+export function getNormalizedPackageText(packageText?: string | null) {
+  return packageText ? normalizeProductName(packageText).replace(/\s+/g, "") : undefined;
+}
+
+export function getProductIdentityKey(input: NormalizedProductIdentityInput) {
+  return `${getNormalizedProductName(input)}|${getNormalizedPackageText(input.packageText) ?? ""}`;
 }
 
 export function extractPackaging(text: string): ParsedPackaging {

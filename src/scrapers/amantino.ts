@@ -1,6 +1,7 @@
 import puppeteer, { Browser, LaunchOptions, Page } from "puppeteer";
 import { existsSync } from "node:fs";
 import { extractPackaging, inferBrand, normalizeProductName } from "@/lib/normalize-product";
+import { persistScrapedProducts } from "@/lib/product-persistence";
 import { Product } from "@/providers/types";
 
 type ScrapeOptions = {
@@ -116,8 +117,9 @@ export async function scrapeAmantinoProducts(options: ScrapeOptions = {}) {
     return normalizeAmantinoCards(rawCards, Boolean(options.promotionsOnly));
   });
 
-  cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, products });
-  return products;
+  const savedProducts = await persistScrapedProducts(products);
+  cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, products: savedProducts });
+  return savedProducts;
 }
 
 export async function scrapeAllAmantinoSeededProducts() {
