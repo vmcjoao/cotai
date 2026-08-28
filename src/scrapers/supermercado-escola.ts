@@ -31,7 +31,6 @@ const DEFAULT_CATEGORY_URLS = [
   `${ESCOLA_BASE_URL}/categoria/queijos`,
   `${ESCOLA_BASE_URL}/categoria/frios`,
   `${ESCOLA_BASE_URL}/categoria/granja`,
-  `${ESCOLA_BASE_URL}/categoria/granja`,
   `${ESCOLA_BASE_URL}/categoria/grife-super`,
   `${ESCOLA_BASE_URL}/categoria/grife-ufv`,
   `${ESCOLA_BASE_URL}/categoria/hortifr-ti`,
@@ -382,27 +381,53 @@ async function scrapeCategoriesWithConcurrency(
   categoryUrls: string[],
   concurrency: number,
   updatedAt: string,
-  maxPages?: number
+  maxPages: number | undefined,
+  onCategoryComplete?: (
+    result: PromiseSettledResult<Product[]>,
+    categoryUrl: string
+  ) => Promise<void>
 ) {
-  const batches: PromiseSettledResult<Product[]>[] = [];
+  const results: PromiseSettledResult<Product[]>[] = [];
   const limitedConcurrency = Math.max(1, Math.min(3, concurrency));
+  let nextCategoryIndex = 0;
 
-  for (let index = 0; index < categoryUrls.length; index += limitedConcurrency) {
-    const batch = categoryUrls.slice(index, index + limitedConcurrency);
-    console.log(
-      `Fetching category batch ${Math.floor(index / limitedConcurrency) + 1}: ${batch
-        .map(categoryLabel)
-        .join(", ")}`
-    );
+  async function worker(workerNumber: number) {
+    while (nextCategoryIndex < categoryUrls.length) {
+      const categoryIndex = nextCategoryIndex;
+      nextCategoryIndex += 1;
+      const categoryUrl = categoryUrls[categoryIndex];
 
-    batches.push(
-      ...(await Promise.allSettled(
-        batch.map((categoryUrl) => scrapeCategory(categoryUrl, updatedAt, maxPages))
-      ))
-    );
+      console.log(
+        `Category worker ${workerNumber}: starting ${categoryLabel(categoryUrl)} ` +
+          `(${categoryIndex + 1}/${categoryUrls.length})`
+      );
+
+      let result: PromiseSettledResult<Product[]>;
+      try {
+        result = {
+          status: "fulfilled",
+          value: await scrapeCategory(categoryUrl, updatedAt, maxPages),
+        };
+      } catch (reason) {
+        result = { status: "rejected", reason };
+      }
+
+      results[categoryIndex] = result;
+
+      if (onCategoryComplete) {
+        await onCategoryComplete(result, categoryUrl);
+      }
+    }
   }
 
-  return batches;
+  await Promise.all(
+    Array.from(
+      { length: Math.min(limitedConcurrency, categoryUrls.length) },
+      (_, index) => worker(index + 1)
+    )
+  );
+
+  return results;
 }
 
 export async function scrapeSupermercadoEscolaProducts(options: ScrapeEscolaOptions = {}) {
@@ -414,11 +439,36 @@ export async function scrapeSupermercadoEscolaProducts(options: ScrapeEscolaOpti
       ? [`${ESCOLA_BASE_URL}/catalogsearch/result/?q=${encodeURIComponent(options.query)}`]
       : DEFAULT_CATEGORY_URLS);
 
+  const savedProducts: Product[] = [];
+  const normalizedQuery = options.query ? normalizeProductName(options.query) : null;
+
   const batches = await scrapeCategoriesWithConcurrency(
     categoryUrls,
     concurrency,
     updatedAt,
-    options.maxPages
+    options.maxPages,
+    async (result, categoryUrl) => {
+      if (result.status === "rejected") {
+        console.error(`Failed category ${categoryLabel(categoryUrl)}:`, result.reason);
+        return;
+      }
+
+      const productsToPersist = result.value.filter(
+        (product) => !normalizedQuery || product.normalizedName.includes(normalizedQuery)
+      );
+
+      if (productsToPersist.length === 0) {
+        console.log(`No products to persist for category ${categoryLabel(categoryUrl)}.`);
+        return;
+      }
+
+      console.log(
+        `Persisting ${productsToPersist.length} product(s) from category ${categoryLabel(categoryUrl)}...`
+      );
+      const persisted = await persistScrapedProducts(productsToPersist);
+      savedProducts.push(...persisted);
+      console.log(`Persisted ${persisted.length} product(s) from category ${categoryLabel(categoryUrl)}.`);
+    }
   );
 
   for (const batch of batches) {
@@ -427,18 +477,12 @@ export async function scrapeSupermercadoEscolaProducts(options: ScrapeEscolaOpti
     }
   }
 
-  const products = dedupeProducts(
-    batches.flatMap((batch) => (batch.status === "fulfilled" ? batch.value : []))
-  );
-
-  if (options.query) {
-    const normalizedQuery = normalizeProductName(options.query);
-    return persistScrapedProducts(
-      products.filter((product) => product.normalizedName.includes(normalizedQuery))
-    );
+  // Keep this guard in case the callback is removed or a caller supplies no batches.
+  if (batches.length === 0) {
+    return [];
   }
 
-  return persistScrapedProducts(products);
+  return dedupeProducts(savedProducts);
 }
 
 function dedupeProducts(products: Product[]) {

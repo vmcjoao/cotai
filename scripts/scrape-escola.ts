@@ -1,4 +1,5 @@
 import { scrapeSupermercadoEscolaProducts } from "@/scrapers/supermercado-escola";
+import { db as prisma } from "@/lib/db";
 
 const args = process.argv.slice(2);
 const queryIndex = args.indexOf("--query");
@@ -14,7 +15,13 @@ async function main() {
   );
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+    process.exit(0);
+  })
+  .catch(async (error) => {
+    console.error(error);
+    await prisma.$disconnect();
+    process.exit(1);
+  });
