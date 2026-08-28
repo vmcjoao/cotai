@@ -28,31 +28,36 @@ const SCROLL_DELAY_MS = 2_500;
 const SEEDED_QUERY_CONCURRENCY = 2;
 
 const querySeeds = [
-  "arroz",
-  "feijao",
-  "oleo",
-  "leite",
-  "acucar",
-  "cafe",
-  "farinha",
-  "macarrao",
-  "manteiga",
-  "queijo",
-  "presunto",
-  "pao",
-  "refrigerante",
-  "suco",
-  "agua",
-  "carne",
-  "frango",
-  "linguica",
-  "tomate",
-  "batata",
-  "cebola",
-  "alface",
-  "detergente",
-  "sabao",
-  "papel",
+  "Alimento-Infantil",
+  "Azeite-E-Oleo-Composto",
+  "Bebida-Alcoolica",
+  "Bebida-Nao-Alcoolica",
+  "Biscoito",
+  "Bomboniere",
+  "Carne",
+  "Cereais",
+  "Cerveja",
+  "Congelado",
+  "Conservas",
+  "Descartável",
+  "Emporio",
+  "Frios-E-Laticinios",
+  "Higiene-E-Beleza",
+  "Hortifruti",
+  "Inseticida-Repelente",
+  "Limpeza",
+  "Massas-E-Sopas",
+  "Matinal",
+  "Molhos-E-Temperos",
+  "Naturais",
+  "Oriental",
+  "Padaria",
+  "Papelaria",
+  "Pet-Shop",
+  "Po-Para-Preparos",
+  "Produto-Amantino",
+  "Sobremesas",
+  "Utilidade",
 ];
 
 const cache = new Map<string, { expiresAt: number; products: Product[] }>();
@@ -145,7 +150,7 @@ function buildAmantinoUrl(options: ScrapeOptions) {
   }
 
   if (options.query?.trim()) {
-    return `${AMANTINO_BASE_URL}?Produto=${encodeURIComponent(options.query.trim())}`;
+    return `${AMANTINO_BASE_URL}?Categoria=${encodeURIComponent(options.query.trim())}`;
   }
 
   return AMANTINO_BASE_URL;
