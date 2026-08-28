@@ -1,13 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { compareCart } from "@/lib/compare-cart";
-import { calculateProductSimilarity, findBestMatch } from "@/lib/matching";
-import { classifyProduct, normalizeProductName } from "@/lib/normalize-product";
+import {
+  calculateProductSimilarity,
+  findBestMatch,
+  findClosestCanonicalProductId,
+} from "@/lib/matching";
+import {
+  classifyProduct,
+  normalizeProductName,
+  normalizeProductNameForMatching,
+} from "@/lib/normalize-product";
 import { getProductSubtotal, getUnitPrice } from "@/lib/pricing";
 import { mockProducts } from "@/data/mock-catalog";
 
 describe("normalizeProductName", () => {
   it("normaliza acentos, caixa e pontuação", () => {
     expect(normalizeProductName("COCA-COLA PET 2LT")).toBe("coca cola pet 2 l");
+  });
+
+  it("remove stop words para matching", () => {
+    expect(normalizeProductNameForMatching("Molho de tomate com manjericão")).toBe(
+      "molho tomate manjericao"
+    );
   });
 });
 
@@ -50,6 +64,30 @@ describe("findBestMatch", () => {
       mockProducts.find((product) => product.id === "escola-mock-papel-higienico-12un")!,
     ]);
     expect(result?.product.id).toBe("escola-mock-papel-toalha-2un");
+  });
+});
+
+describe("findClosestCanonicalProductId", () => {
+  const canonicalProducts = [
+    { id: "arroz-5kg", name: "Arroz Tipo 1 5kg", normalizedName: "arroz tipo 1 5 kg" },
+    { id: "coca-2l", name: "Refrigerante Coca-Cola 2L", normalizedName: "refrigerante coca cola 2 l" },
+    { id: "molho-tomate", name: "Molho de Tomate Tradicional 300g" },
+  ];
+
+  it("retorna id canonico para nomes raspados com acentos, stop words e ordem diferente", () => {
+    expect(findClosestCanonicalProductId("Coca Cola Refrigerante PET 2LT", canonicalProducts)).toBe(
+      "coca-2l"
+    );
+  });
+
+  it("aceita pequenas diferenças de digitação acima do limiar", () => {
+    expect(findClosestCanonicalProductId("Refrogerante Coca Cola 2L", canonicalProducts)).toBe(
+      "coca-2l"
+    );
+  });
+
+  it("recusa nomes abaixo do limiar de similaridade", () => {
+    expect(findClosestCanonicalProductId("Sabonete hidratante", canonicalProducts)).toBeNull();
   });
 });
 

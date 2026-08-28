@@ -29,7 +29,7 @@ export type ParsedPackaging = {
   packageText?: string;
 };
 
-const stopwords = new Set([
+export const productNameStopwords = new Set([
   "de",
   "da",
   "do",
@@ -145,8 +145,12 @@ export function tokenizeProductName(text: string) {
   return normalizeProductName(text)
     .split(" ")
     .filter(Boolean)
-    .filter((token) => !stopwords.has(token))
+    .filter((token) => !productNameStopwords.has(token))
     .filter((token) => !/^\d+(?:,\d+)?$/.test(token));
+}
+
+export function normalizeProductNameForMatching(text: string) {
+  return tokenizeProductName(text).join(" ");
 }
 
 export function classifyProduct(text: string) {
