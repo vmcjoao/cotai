@@ -131,57 +131,159 @@ async function findExistingProduct(product: Product, storeId: string) {
   });
 }
 
+async function findExistingProducts(products: Product[], storeId: string) {
+  const ids = products.map((product) => product.id);
+  const externalIds = products
+    .map((product) => product.externalId)
+    .filter((externalId): externalId is string => Boolean(externalId));
+  const identityFilters = products.map((product) => ({
+    normalizedName: getNormalizedProductName(product),
+    packageText: getNormalizedPackageText(product.packageText) ?? product.packageText,
+    priceHistory: { some: { storeId } },
+  }));
+
+  return db.product.findMany({
+    where: {
+      OR: [
+        ids.length > 0 ? { id: { in: ids } } : undefined,
+        externalIds.length > 0
+          ? {
+              externalId: { in: externalIds },
+              priceHistory: { some: { storeId } },
+            }
+          : undefined,
+        ...identityFilters,
+      ].filter(Boolean) as Prisma.ProductWhereInput[],
+    },
+    include: {
+      priceHistory: {
+        where: { storeId },
+        take: 1,
+      },
+    },
+  });
+}
+
+function productIdentityKey(product: Product) {
+  return `${getNormalizedProductName(product)}|${getNormalizedPackageText(product.packageText) ?? product.packageText ?? ""}`;
+}
+
+function dedupeProductsForPersistence(products: Product[]) {
+  const deduped = new Map<string, Product>();
+
+  for (const product of products) {
+    const key = `${product.store}|${product.externalId ?? productIdentityKey(product)}`;
+    deduped.set(key, product);
+  }
+
+  return [...deduped.values()];
+}
+
+function chunk<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+}
+
 export async function persistScrapedProducts(products: Product[]) {
   const savedProducts: Product[] = [];
+  const canonicalProducts = dedupeProductsForPersistence(products.map(canonicalizeProduct));
+  const productsByStore = new Map<StoreKey, Product[]>();
 
-  for (const scrapedProduct of products) {
-    const product = canonicalizeProduct(scrapedProduct);
+  for (const product of canonicalProducts) {
+    productsByStore.set(product.store, [...(productsByStore.get(product.store) ?? []), product]);
+  }
+
+  for (const [storeKey, storeProducts] of productsByStore) {
     const store = await db.store.upsert({
-      where: { key: product.store },
+      where: { key: storeKey },
       update: {
-        name: storeMeta[product.store].label,
-        slug: product.store,
-        websiteUrl: storeWebsiteUrls[product.store],
+        name: storeMeta[storeKey].label,
+        slug: storeKey,
+        websiteUrl: storeWebsiteUrls[storeKey],
       },
       create: {
-        key: product.store,
-        name: storeMeta[product.store].label,
-        slug: product.store,
-        websiteUrl: storeWebsiteUrls[product.store],
+        key: storeKey,
+        name: storeMeta[storeKey].label,
+        slug: storeKey,
+        websiteUrl: storeWebsiteUrls[storeKey],
       },
     });
 
-    const existingProduct = await findExistingProduct(product, store.id);
-    const dbProduct = await db.product.upsert({
-      where: { id: existingProduct?.id ?? product.id },
-      update: productUpdatePayload(product),
-      create: productPayload(product),
-    });
+    const existingProducts = await findExistingProducts(storeProducts, store.id);
+    const existingById = new Map(existingProducts.map((product) => [product.id, product]));
+    const existingByExternalId = new Map(
+      existingProducts
+        .filter((product) => product.externalId)
+        .map((product) => [product.externalId!, product])
+    );
+    const existingByIdentity = new Map(
+      existingProducts.map((product) => [
+        `${getNormalizedProductName(product)}|${getNormalizedPackageText(product.packageText) ?? product.packageText ?? ""}`,
+        product,
+      ])
+    );
 
-    await db.priceHistory.create({
-      data: {
-        productId: dbProduct.id,
+    const resolvedProducts = storeProducts.map((product) => ({
+      product,
+      existing:
+        existingById.get(product.id) ??
+        (product.externalId ? existingByExternalId.get(product.externalId) : undefined) ??
+        existingByIdentity.get(productIdentityKey(product)),
+    }));
+
+    const persistedByInputId = new Map<string, string>();
+
+    for (const batch of chunk(resolvedProducts, 10)) {
+      const dbProducts = await Promise.all(
+        batch.map(({ product, existing }) =>
+          db.product.upsert({
+            where: { id: existing?.id ?? product.id },
+            update: productUpdatePayload(product),
+            create: productPayload(product),
+          })
+        )
+      );
+
+      dbProducts.forEach((dbProduct, index) => {
+        persistedByInputId.set(batch[index].product.id, dbProduct.id);
+      });
+    }
+
+    await db.priceHistory.createMany({
+      data: storeProducts.map((product) => ({
+        productId: persistedByInputId.get(product.id) ?? product.id,
         storeId: store.id,
         price: product.price,
         originalPrice: product.originalPrice,
         promotion: product.promotion,
         source: mapSource(product.source),
         observedAt: new Date(product.updatedAt),
-      },
+      })),
+      skipDuplicates: true,
     });
+
+    const persistedProductIds = [
+      ...new Set(
+        storeProducts.map((product) => persistedByInputId.get(product.id) ?? product.id)
+      ),
+    ];
 
     await db.promotion.deleteMany({
       where: {
-        productId: dbProduct.id,
+        productId: { in: persistedProductIds },
         storeId: store.id,
-        source: mapSource(product.source),
       },
     });
 
-    if (product.promotion) {
-      await db.promotion.create({
-        data: {
-          productId: dbProduct.id,
+    const promotions = storeProducts.filter((product) => product.promotion);
+
+    if (promotions.length > 0) {
+      await db.promotion.createMany({
+        data: promotions.map((product) => ({
+          productId: persistedByInputId.get(product.id) ?? product.id,
           storeId: store.id,
           title: product.name,
           price: product.price,
@@ -191,11 +293,16 @@ export async function persistScrapedProducts(products: Product[]) {
           sourceUrl: product.productUrl,
           source: mapSource(product.source),
           startsAt: new Date(product.updatedAt),
-        },
+        })),
       });
     }
 
-    savedProducts.push({ ...product, id: dbProduct.id });
+    savedProducts.push(
+      ...storeProducts.map((product) => ({
+        ...product,
+        id: persistedByInputId.get(product.id) ?? product.id,
+      }))
+    );
   }
 
   return savedProducts;

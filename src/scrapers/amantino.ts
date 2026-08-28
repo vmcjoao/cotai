@@ -23,6 +23,9 @@ type NormalizedCard = Product;
 const DEFAULT_LIMIT = 60;
 const AMANTINO_BASE_URL = "https://amantino.marketmine.com.br/principal";
 const CACHE_TTL_MS = 1000 * 60 * 10;
+const PRODUCT_LOAD_TIMEOUT_MS = 90_000;
+const SCROLL_DELAY_MS = 2_500;
+const SEEDED_QUERY_CONCURRENCY = 2;
 
 const querySeeds = [
   "arroz",
@@ -64,25 +67,21 @@ export async function scrapeAmantinoProducts(options: ScrapeOptions = {}) {
 
   const products = await withBrowser(async (browser) => {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
-    await page.goto(buildAmantinoUrl(options), {
+    const url = buildAmantinoUrl(options);
+    console.log(`Amantino: opening ${url}`);
+    await page.setViewport({ width: 800, height: 600, deviceScaleFactor: 1 });
+    await page.goto(url, {
       waitUntil: "domcontentloaded",
-      timeout: 60_000,
+      timeout: PRODUCT_LOAD_TIMEOUT_MS,
     });
 
-    await page.waitForFunction(
-      () => {
-        const list = document.querySelector("#CRDPRODUTOSFRAPRODUTOS");
-        const titles = Array.from(document.querySelectorAll("h5")).filter(
-          (heading) => (heading.textContent ?? "").trim().length > 0
-        );
-        return Boolean(list) && titles.length > 1;
-      },
-      { timeout: 60_000 }
-    );
+    console.log("Amantino: waiting for product cards...");
+    await waitForProductCards(page);
+    console.log("Amantino: product cards detected.");
 
     await autoScrollProductList(page, options.limit ?? DEFAULT_LIMIT);
 
+    console.log("Amantino: extracting product cards from DOM...");
     const rawCards = await page.evaluate(() => {
       const container = document.querySelector("#CRDPRODUTOSFRAPRODUTOS");
       if (!container) {
@@ -114,18 +113,28 @@ export async function scrapeAmantinoProducts(options: ScrapeOptions = {}) {
 
     await page.close();
 
+    console.log(`Amantino: extracted ${rawCards.length} raw card(s).`);
     return normalizeAmantinoCards(rawCards, Boolean(options.promotionsOnly));
   });
 
+  console.log(`Amantino: normalized ${products.length} product(s), persisting to database...`);
   const savedProducts = await persistScrapedProducts(products);
+  console.log(`Amantino: persisted ${savedProducts.length} product(s).`);
   cache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, products: savedProducts });
   return savedProducts;
 }
 
 export async function scrapeAllAmantinoSeededProducts() {
-  const allResults = await Promise.all(
-    querySeeds.map((query) => scrapeAmantinoProducts({ query, limit: 40 }))
-  );
+  const allResults: Product[][] = [];
+
+  for (let index = 0; index < querySeeds.length; index += SEEDED_QUERY_CONCURRENCY) {
+    const batch = querySeeds.slice(index, index + SEEDED_QUERY_CONCURRENCY);
+    console.log(`Amantino: scraping query batch ${Math.floor(index / SEEDED_QUERY_CONCURRENCY) + 1}: ${batch.join(", ")}`);
+    const results = await Promise.all(
+      batch.map((query) => scrapeAmantinoProducts({ query, limit: 40 }))
+    );
+    allResults.push(...results);
+  }
 
   return dedupeProducts(allResults.flat());
 }
@@ -146,11 +155,13 @@ async function autoScrollProductList(page: Page, limit: number) {
   let previousCount = 0;
   let stableRounds = 0;
 
-  while (stableRounds < 3) {
+  while (stableRounds < 4) {
     const currentCount = await page.evaluate(() => {
       const container = document.querySelector("#CRDPRODUTOSFRAPRODUTOS");
       return container?.querySelectorAll("li.cardorion h5").length ?? 0;
     });
+
+    console.log(`Amantino: product list currently has ${currentCount} card(s).`);
 
     if (currentCount >= limit) {
       break;
@@ -167,10 +178,43 @@ async function autoScrollProductList(page: Page, limit: number) {
       const container = document.querySelector("#CRDPRODUTOSFRAPRODUTOS");
       if (container) {
         container.scrollTop = container.scrollHeight;
+        container.dispatchEvent(new Event("scroll", { bubbles: true }));
       }
     });
 
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await waitForProductCountChange(page, currentCount, SCROLL_DELAY_MS);
+  }
+}
+
+async function waitForProductCards(page: Page) {
+  await page.waitForFunction(
+    () => {
+      const container = document.querySelector("#CRDPRODUTOSFRAPRODUTOS");
+      if (!container) {
+        return false;
+      }
+
+      const cards = Array.from(container.querySelectorAll("li.cardorion"));
+      return cards.some((card) => {
+        const name = card.querySelector("h5")?.textContent?.trim();
+        const text = card.textContent ?? "";
+        return Boolean(name) && /R\$\s*[\d.,]+/.test(text);
+      });
+    },
+    { timeout: PRODUCT_LOAD_TIMEOUT_MS }
+  );
+}
+
+async function waitForProductCountChange(page: Page, previousCount: number, timeoutMs: number) {
+  try {
+    await page.waitForFunction(
+      (count) =>
+        document.querySelectorAll("#CRDPRODUTOSFRAPRODUTOS li.cardorion h5").length > count,
+      { timeout: timeoutMs },
+      previousCount
+    );
+  } catch {
+    await new Promise((resolve) => setTimeout(resolve, timeoutMs));
   }
 }
 
@@ -266,16 +310,21 @@ function getLaunchOptions(): LaunchOptions {
 }
 
 function resolveChromeExecutablePath() {
-  const candidates = [
-    process.env.PUPPETEER_EXECUTABLE_PATH,
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-  ].filter(Boolean) as string[];
+  try {
+    // Let Puppeteer find its own installed browser automatically
+    return puppeteer.executablePath();
+  } catch (e) {
+    const candidates = [
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      "/usr/bin/google-chrome",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+    ].filter(Boolean) as string[];
 
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) {
-      return candidate;
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) {
+        return candidate;
+      }
     }
   }
 

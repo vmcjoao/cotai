@@ -13,18 +13,35 @@ type ScrapeEscolaOptions = {
   query?: string;
   categoryUrls?: string[];
   maxPages?: number;
+  concurrency?: number;
 };
 
 const ESCOLA_BASE_URL = "https://supermercadoescola.org.br";
+const PAGE_DELAY_MS = 500;
+const DEFAULT_CATEGORY_CONCURRENCY = 2;
+const MAX_SAFETY_PAGES = 200;
 const DEFAULT_CATEGORY_URLS = [
-  `${ESCOLA_BASE_URL}/categoria/produtos-vi-osa`,
-  `${ESCOLA_BASE_URL}/categoria/arroz`,
-  `${ESCOLA_BASE_URL}/categoria/leites`,
-  `${ESCOLA_BASE_URL}/categoria/feij-o`,
-  `${ESCOLA_BASE_URL}/categoria/caf-s`,
-  `${ESCOLA_BASE_URL}/categoria/refrigerantes`,
+  `${ESCOLA_BASE_URL}/categoria/a-cougue`,
+  `${ESCOLA_BASE_URL}/categoria/bazar`,
+  `${ESCOLA_BASE_URL}/categoria/bebidas`,
+  `${ESCOLA_BASE_URL}/categoria/biscoitos-pdaria-externa`,
+  `${ESCOLA_BASE_URL}/categoria/bomboniere-doces`,
+  `${ESCOLA_BASE_URL}/categoria/cereais`,
+  `${ESCOLA_BASE_URL}/categoria/del-cia-da-casa`,
   `${ESCOLA_BASE_URL}/categoria/queijos`,
-  `${ESCOLA_BASE_URL}/categoria/manteiga`,
+  `${ESCOLA_BASE_URL}/categoria/frios`,
+  `${ESCOLA_BASE_URL}/categoria/granja`,
+  `${ESCOLA_BASE_URL}/categoria/granja`,
+  `${ESCOLA_BASE_URL}/categoria/grife-super`,
+  `${ESCOLA_BASE_URL}/categoria/grife-ufv`,
+  `${ESCOLA_BASE_URL}/categoria/hortifr-ti`,
+  `${ESCOLA_BASE_URL}/categoria/limpeza`,
+  `${ESCOLA_BASE_URL}/categoria/matinais`,
+  `${ESCOLA_BASE_URL}/categoria/mercearia`,
+  `${ESCOLA_BASE_URL}/categoria/natural-diet`,
+  `${ESCOLA_BASE_URL}/categoria/perfumaria-higiene`,
+  `${ESCOLA_BASE_URL}/categoria/pet-shop`,
+  `${ESCOLA_BASE_URL}/categoria/produtos-vi-osa`,
 ];
 
 async function fetchPublic(url: string) {
@@ -41,6 +58,19 @@ async function fetchPublic(url: string) {
   }
 
   return response.text();
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function categoryLabel(categoryUrl: string) {
+  try {
+    const url = new URL(categoryUrl);
+    return decodeURIComponent(url.pathname.split("/").filter(Boolean).at(-1) ?? categoryUrl);
+  } catch {
+    return categoryUrl;
+  }
 }
 
 function absoluteUrl(pathOrUrl?: string) {
@@ -273,42 +303,122 @@ function extractCategoryId(html: string) {
   return html.match(/produtos-ajax\?categoria_id=(\d+)/)?.[1] ?? null;
 }
 
-async function scrapeCategory(categoryUrl: string, maxPages: number, updatedAt: string) {
+function getPaginationState(html: string, pageProducts: Product[]) {
+  const normalizedHtml = normalizeProductName(stripTags(html));
+  const lastPageMatch =
+    html.match(/data-(?:last|total)-pages?=["']?(\d+)/i) ??
+    html.match(/["'](?:last_page|lastPage|total_pages|totalPages)["']\s*:\s*(\d+)/i);
+  const currentPageMatch =
+    html.match(/data-(?:current-)?page=["']?(\d+)/i) ??
+    html.match(/["'](?:current_page|currentPage|page)["']\s*:\s*(\d+)/i);
+
+  return {
+    isEmpty: pageProducts.length === 0,
+    hasEndMessage:
+      normalizedHtml.includes("todos os produtos foram carregados") ||
+      normalizedHtml.includes("nenhum produto encontrado") ||
+      normalizedHtml.includes("fim"),
+    currentPage: currentPageMatch ? Number(currentPageMatch[1]) : null,
+    lastPage: lastPageMatch ? Number(lastPageMatch[1]) : null,
+  };
+}
+
+function reachedLastPage(state: ReturnType<typeof getPaginationState>, fallbackPage: number) {
+  const currentPage = state.currentPage ?? fallbackPage;
+  return state.lastPage !== null && currentPage >= state.lastPage;
+}
+
+async function scrapeCategory(categoryUrl: string, updatedAt: string, maxPages?: number) {
+  const label = categoryLabel(categoryUrl);
+  console.log(`Fetching category ${label}, initial page...`);
   const firstPageHtml = await fetchPublic(categoryUrl);
   const products = [
     ...extractDataLayerProducts(firstPageHtml, categoryUrl, updatedAt),
     ...extractProductCards(firstPageHtml, categoryUrl, updatedAt),
   ];
+  console.log(`Fetched category ${label}, initial page: ${products.length} product(s).`);
+
   const categoryId = extractCategoryId(firstPageHtml);
 
   if (categoryId) {
-    for (let page = 1; page <= maxPages; page += 1) {
+    let page = 1;
+
+    while (page <= (maxPages ?? MAX_SAFETY_PAGES)) {
       const pageUrl = `${ESCOLA_BASE_URL}/produto/produtos-ajax?categoria_id=${categoryId}&page=${page}`;
+      console.log(`Fetching category ${label}, page ${page}...`);
       const fragment = await fetchPublic(pageUrl);
       const pageProducts = extractProductCards(fragment, categoryUrl, updatedAt);
+      const paginationState = getPaginationState(fragment, pageProducts);
 
-      if (pageProducts.length === 0) {
+      console.log(`Fetched category ${label}, page ${page}: ${pageProducts.length} product(s).`);
+
+      if (paginationState.isEmpty || paginationState.hasEndMessage) {
+        console.log(`Finished category ${label} at page ${page}: empty/end response.`);
         break;
       }
 
       products.push(...pageProducts);
+
+      if (reachedLastPage(paginationState, page)) {
+        console.log(`Finished category ${label} at page ${page}: last page reached.`);
+        break;
+      }
+
+      page += 1;
+      await delay(PAGE_DELAY_MS);
+    }
+
+    if (page > (maxPages ?? MAX_SAFETY_PAGES)) {
+      console.warn(`Stopped category ${label} after ${maxPages ?? MAX_SAFETY_PAGES} page(s) without an empty page.`);
     }
   }
 
-  return dedupeProducts(products);
+  const deduped = dedupeProducts(products);
+  console.log(`Finished category ${label}: ${deduped.length} unique product(s).`);
+  return deduped;
+}
+
+async function scrapeCategoriesWithConcurrency(
+  categoryUrls: string[],
+  concurrency: number,
+  updatedAt: string,
+  maxPages?: number
+) {
+  const batches: PromiseSettledResult<Product[]>[] = [];
+  const limitedConcurrency = Math.max(1, Math.min(3, concurrency));
+
+  for (let index = 0; index < categoryUrls.length; index += limitedConcurrency) {
+    const batch = categoryUrls.slice(index, index + limitedConcurrency);
+    console.log(
+      `Fetching category batch ${Math.floor(index / limitedConcurrency) + 1}: ${batch
+        .map(categoryLabel)
+        .join(", ")}`
+    );
+
+    batches.push(
+      ...(await Promise.allSettled(
+        batch.map((categoryUrl) => scrapeCategory(categoryUrl, updatedAt, maxPages))
+      ))
+    );
+  }
+
+  return batches;
 }
 
 export async function scrapeSupermercadoEscolaProducts(options: ScrapeEscolaOptions = {}) {
   const updatedAt = new Date().toISOString();
-  const maxPages = options.maxPages ?? 4;
+  const concurrency = options.concurrency ?? DEFAULT_CATEGORY_CONCURRENCY;
   const categoryUrls =
     options.categoryUrls ??
     (options.query
       ? [`${ESCOLA_BASE_URL}/catalogsearch/result/?q=${encodeURIComponent(options.query)}`]
       : DEFAULT_CATEGORY_URLS);
 
-  const batches = await Promise.allSettled(
-    categoryUrls.map((categoryUrl) => scrapeCategory(categoryUrl, maxPages, updatedAt))
+  const batches = await scrapeCategoriesWithConcurrency(
+    categoryUrls,
+    concurrency,
+    updatedAt,
+    options.maxPages
   );
 
   for (const batch of batches) {
