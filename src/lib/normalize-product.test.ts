@@ -7,6 +7,8 @@ import {
 } from "@/lib/matching";
 import {
   classifyProduct,
+  calculateStandardizedPricePerUnit,
+  extractProductMeasure,
   normalizeProductName,
   normalizeProductNameForMatching,
 } from "@/lib/normalize-product";
@@ -22,6 +24,74 @@ describe("normalizeProductName", () => {
     expect(normalizeProductNameForMatching("Molho de tomate com manjericão")).toBe(
       "molho tomate manjericao"
     );
+  });
+});
+
+describe("extractProductMeasure", () => {
+  it("extrai volume em litros", () => {
+    expect(extractProductMeasure("Leite Integral 1L")).toEqual({
+      quantity: 1,
+      unit: "l",
+      standardizedQuantity: 1,
+      standardizedUnit: "l",
+      packageText: "1l",
+    });
+  });
+
+  it("extrai peso em gramas e padroniza para quilogramas", () => {
+    expect(extractProductMeasure("Queijo Mussarela 500g")).toEqual({
+      quantity: 500,
+      unit: "g",
+      standardizedQuantity: 0.5,
+      standardizedUnit: "kg",
+      packageText: "500g",
+    });
+  });
+
+  it("extrai decimal com virgula", () => {
+    expect(extractProductMeasure("Agua Mineral 1,5L")).toEqual({
+      quantity: 1.5,
+      unit: "l",
+      standardizedQuantity: 1.5,
+      standardizedUnit: "l",
+      packageText: "1,5l",
+    });
+  });
+
+  it("soma embalagem multipack", () => {
+    expect(extractProductMeasure("Iogurte 2x500g")).toEqual({
+      quantity: 1000,
+      unit: "g",
+      standardizedQuantity: 1,
+      standardizedUnit: "kg",
+      packageText: "1000g",
+    });
+  });
+});
+
+describe("calculateStandardizedPricePerUnit", () => {
+  it("calcula preco por litro", () => {
+    expect(calculateStandardizedPricePerUnit("Leite Integral 1L", 4.99)).toEqual({
+      value: 4.99,
+      unit: "l",
+      quantity: 1,
+      sourceQuantity: 1,
+      sourceUnit: "l",
+    });
+  });
+
+  it("calcula preco por quilograma", () => {
+    expect(calculateStandardizedPricePerUnit("Queijo Mussarela 500g", 24.95)).toEqual({
+      value: 49.9,
+      unit: "kg",
+      quantity: 0.5,
+      sourceQuantity: 500,
+      sourceUnit: "g",
+    });
+  });
+
+  it("retorna null quando nao ha peso ou volume", () => {
+    expect(calculateStandardizedPricePerUnit("Alface unidade", 2.49)).toBeNull();
   });
 });
 
